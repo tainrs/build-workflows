@@ -1,0 +1,142 @@
+name: update-versions
+
+# Triggers for the workflow: manually (workflow_dispatch) or every 15 minutes (schedule).
+on:
+  workflow_dispatch:
+  schedule:
+    - cron:  '* */6 * * *'
+
+jobs:
+  do-work:
+    runs-on: ubuntu-latest
+    env:
+      REPOSITORY_OWNER: ${{ github.repository_owner }}
+      GH_ACTOR:         ${{ github.actor }}
+      GH_TOKEN:         ${{ secrets.GH_TOKEN }}
+      SLACK_WEBHOOK:    ${{ secrets.SLACK_WEBHOOK }}
+      REPOSITORY_FILTER: ${{ github.event.client_payload.repo }}
+      BRANCH_FILTER:    ${{ github.event.client_payload.branch }}
+
+    steps:
+      - name: Git Config
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Do Work
+        run: |
+          while read REPOSITORY; do
+
+            while IFS= read -r BRANCH; do
+
+              git clone -b "${BRANCH}" "https://${GH_TOKEN}@github.com/${REPOSITORY_OWNER}/${REPOSITORY}.git"
+              cd "${REPOSITORY}" || exit 1
+
+              # Checkout the branch.
+              git checkout "${BRANCH}"
+
+              [[ -f update-versions.sh ]] && old_version="$(jq -r '.version' < VERSION.json)" || continue
+              [[ -f update-versions.sh ]] && GITHUB_ACTOR=${GH_ACTOR} GITHUB_TOKEN=${GH_TOKEN} bash ./update-versions.sh || continue
+
+              echo "Debug message: ${old_version}"
+
+              new_version="$(jq -re '.version' < VERSION.json)"
+              if [[ $? -ne 0 ]]; then
+                echo "No changes detected. Skipping..."
+                continue
+              fi
+
+              echo "Debug message: ${new_version}"
+
+              # Check if there are any changes.
+              if [[ -z $(git status -s) ]]; then
+                echo "No changes detected. Skipping..."
+                continue
+              else
+                echo "Changes detected. Proceeding..."
+              fi
+
+              commit_message="Version update: ${old_version} => ${new_version}"
+              slack_message="Version changes detected: \`${old_version}\` => \`${new_version}\`"
+
+              pr_branch="update-versions-${BRANCH}"
+
+              echo "Debug message: Stashing the changes..."
+
+              # Stash the changes.
+              git stash
+
+              echo "Debug message: Checking out the '${pr_branch}' branch..."
+
+              if git ls-remote --exit-code --heads origin "${pr_branch}"; then
+                git fetch origin "${pr_branch}"
+                git checkout -B "${pr_branch}" "origin/${pr_branch}"
+              else
+                git checkout -b "${pr_branch}"
+              fi
+
+              echo "Debug message: Pop the stash..."
+
+              # And pop the stash.
+              git stash pop
+
+              echo "Debug message: Adding the changes to the repository..."
+
+              git status
+
+              # Add the changes to the repository.
+              git add .
+
+              # Commit the changes if there are any.
+              if git commit -m "${commit_message}"; then
+
+                git push --set-upstream origin "${pr_branch}"
+
+                if ! gh auth status; then
+                  echo "Authenticating with gh..."
+                  gh auth login --with-token <<< "${GH_TOKEN}"
+                fi
+
+                echo "So far, so good... "
+
+                pr_exists=$(gh pr list --base "${BRANCH}" --head "${pr_branch}" --repo "${REPOSITORY_OWNER}/${REPOSITORY}" --json number --jq '. | length')
+
+                pr_body_text="Version changes detected: \`${old_version}\` => \`${new_version}\`<br/>This PR was automatically created by the \`update-versions.sh\` script."
+
+                if [ "$pr_exists" -gt 0 ]; then
+                  pr_number=$(gh pr list --base "${BRANCH}" --head "${pr_branch}" --repo "${REPOSITORY_OWNER}/${REPOSITORY}" --json number --jq '.[0].number')
+                  gh pr comment "${pr_number}" --body "Additional updates have been made by the \`update-versions.sh\` script.<br/><br/>${pr_body_text}"
+                else
+                  gh pr create --title "Version update: ${old_version} => ${new_version} by 'update-versions.sh' on branch ${BRANCH}" --body "${pr_body_text}" --base "${BRANCH}" --head "${pr_branch}" --repo "${REPOSITORY_OWNER}/${REPOSITORY}"
+                  GIT_SHA=$(git log -n 1 --pretty=format:"%H")
+                  timestamp=$(date +%s)
+                  json=$(jq -nc --arg title "${REPOSITORY_OWNER}/${REPOSITORY}:${BRANCH}" \
+                                  --arg url "https://github.com/${REPOSITORY_OWNER}/${REPOSITORY}/commit/${GIT_SHA}" \
+                                  --arg description "${slack_message}" \
+                                  --arg color "#36a64f" \
+                                  --arg timestamp "${timestamp}" \
+                                  '{"attachments": [
+                                    {
+                                      "title": $title,
+                                      "title_link": $url,
+                                      "text": $description,
+                                      "color": $color,
+                                      "footer": "Powered by GitHub Actions",
+                                      "ts": $timestamp
+                                    }
+                                  ]}')
+                  # Send the Slack notification.
+                  curl -fsSL -X POST -H "Content-Type: application/json" -d "${json}" "${SLACK_WEBHOOK}"
+                fi
+
+              fi
+
+              # Go to the parent directory and remove the cloned repository.
+              cd .. || exit 1
+              rm -rf "${REPOSITORY}"
+            done < <(curl -u "${GH_ACTOR}:${GH_TOKEN}" -fsSL "https://api.github.com/repos/${REPOSITORY_OWNER}/${REPOSITORY}/branches" | jq -re --arg branch_filter "${BRANCH_FILTER}" '.[] | select(.name!="main") | select(.name|test("\($branch_filter)")) | select(.name | test("^update-") | not) | .name')
+          done < <(curl -u "${GH_ACTOR}:${GH_TOKEN}" -fsSL "https://api.github.com/users/${REPOSITORY_OWNER}/repos?per_page=1000" | jq -re --arg repository_filter "${REPOSITORY_FILTER}" '.[] | select(.topics[]=="docker-image") | select(.name|test("\($repository_filter)")) | .name')
+

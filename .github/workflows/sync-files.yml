@@ -1,0 +1,129 @@
+name: sync-files  # Name of the GitHub Action workflow
+
+on:
+  workflow_dispatch:  # Trigger the workflow manually via the GitHub Actions interface
+
+jobs:
+  do-work:
+    runs-on: ubuntu-latest  # The job will run on the latest Ubuntu runner provided by GitHub
+    env:
+      REPOSITORY_OWNER: ${{ github.repository_owner }}  # Set the repository owner as an environment variable
+      GH_ACTOR: ${{ github.actor }}  # Set the GitHub actor (user who triggered the workflow) as an environment variable
+      GH_TOKEN: ${{ secrets.TAINRS_PERSONAL_ACCESS_TOKEN }}  # Set the GitHub token as an environment variable
+
+    steps:
+      - name: Git Config
+        run: |
+          # Configure git to use the GitHub Actions bot's name and email for commits
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Do Work
+        run: |
+          # Loop through each repository under the user's account
+          while read REPOSITORY; do
+            # Loop through each branch of the current repository, filtered by branch_filter
+            while IFS= read -r BRANCH; do
+              # Exclude branches starting with sync-update-
+              if [[ $BRANCH == sync-update-* ]]; then
+                continue
+              fi
+
+              # Temporary only process tainrs/sonarr - release branch
+              if [[ $BRANCH != release ]]; then
+                continue
+              fi
+
+              # Clone the specific branch of the repository using the personal access token
+              git clone -b "${BRANCH}" "https://${GH_TOKEN}@github.com/${REPOSITORY_OWNER}/${REPOSITORY}.git"
+              cd "${REPOSITORY}" || exit 1  # Enter the repository directory, exit if it fails
+
+              ###########################################
+              # Define an array of file URLs and their corresponding local file names
+              declare -A files=(
+                ["LICENSE"]="https://raw.githubusercontent.com/tainrs/base/jammy/LICENSE"
+                ["build.sh"]="https://raw.githubusercontent.com/tainrs/base/jammy/build.sh"
+                [".gitattributes"]="https://raw.githubusercontent.com/tainrs/base/jammy/.gitattributes"
+                [".dockerignore"]="https://raw.githubusercontent.com/tainrs/base/jammy/.dockerignore"
+              )
+
+              echo "-------- START --------"
+              echo "Do Stuff!"
+              echo "Repository: ${REPOSITORY}"
+              echo "Branch: ${BRANCH}"
+
+              echo "Downloading files..."
+
+              # Loop through the files array and download each file only if it already exists
+              for file in "${!files[@]}"; do
+                if [ -f "$file" ]; then
+                  echo "Downloading $file..."
+                  curl -fsSL "${files[$file]}" -o "$file"
+                fi
+              done
+
+              # Number of files changed
+              changed_files_count=$(git status --porcelain | wc -l)
+
+              # If number of files changed is 0, exit the loop
+              if [ "$changed_files_count" -eq 0 ]; then
+                echo "No files changed. Skipping..."
+                continue
+              fi
+
+              # Create multiline string containing modified files.
+              # The string should start with 'modified files:' followed by the list of modified files
+              # Use `git status --porcelain | awk '{print $2}'` to get the list of modified files and format it as a list
+              pr_body_text="Modified files:<br/>$(git status --porcelain | awk '{print $2}')<br/><br/>This PR was automatically created to sync files from the docker.io/base:jammy repository"
+
+              # Stage all changes for commit
+              git add .
+
+              # Check if the branch exists on the remote
+              if git ls-remote --exit-code --heads origin "sync-update-${BRANCH}"; then
+                git fetch origin "sync-update-${BRANCH}"
+                git checkout -B "sync-update-${BRANCH}" "origin/sync-update-${BRANCH}"
+              else
+                git checkout -b "sync-update-${BRANCH}"
+              fi
+
+              # Commit changes with a message, and only push if there are new changes to commit
+              if git commit -m "FileSync Updates [skip ci]"; then
+                # Check if gh is properly authenticated
+                if ! gh auth status; then
+                  echo "Authenticating with gh..."
+                  gh auth login --with-token <<< "${GH_TOKEN}"
+                fi
+
+                # Check if a pull request already exists
+                pr_exists=$(gh pr list --base "${BRANCH}" --head "sync-update-${BRANCH}" --repo "${REPOSITORY_OWNER}/${REPOSITORY}" --json number --jq '. | length')
+
+                if [ "$pr_exists" -gt 0 ]; then
+                  pr_number=$(gh pr list --base "${BRANCH}" --head "sync-update-${BRANCH}" --repo "${REPOSITORY_OWNER}/${REPOSITORY}" --json number --jq '.[0].number')
+                  gh pr comment "${pr_number}" --body "Additional file sync updates have been made.<br/><br/>${pr_body_text}"
+
+                # Push the changes to the remote branch
+                git push --set-upstream origin "sync-update-${BRANCH}"
+                else
+                  # Push the changes to the remote branch
+                  git push --set-upstream origin "sync-update-${BRANCH}"
+
+                  # Create a pull request with the changes
+                  # Set the `--body` string parameter to include the list of modified files. This will be displayed in the PR description
+                  gh pr create --title "File Sync Updates on branch ${BRANCH}" --body "${pr_body_text}" --base "${BRANCH}" --head "sync-update-${BRANCH}" --repo "${REPOSITORY_OWNER}/${REPOSITORY}"
+                fi
+              fi
+              ###########################################
+
+              cd .. || exit 1  # Return to the parent directory, exit if it fails
+              rm -rf "${REPOSITORY}"  # Remove the local clone of the repository
+
+              echo "-------- DONE --------"
+            done < <(curl -u "${GH_ACTOR}:${GH_TOKEN}" -fsSL "https://api.github.com/repos/${REPOSITORY_OWNER}/${REPOSITORY}/branches" | jq -re --arg branch_filter "${BRANCH_FILTER}" '.[] | select(.name|test("\($branch_filter)")) | select(.name | test("^sync-update-") | not) | .name')
+            # Get the list of branches for the current repository and filter them based on branch_filter and exclude sync-update-* branches
+
+          done < <(curl -u "${GH_ACTOR}:${GH_TOKEN}" -fsSL "https://api.github.com/users/${REPOSITORY_OWNER}/repos?per_page=1000" | jq -re --arg repository_filter "${REPOSITORY_FILTER}" '.[] | select(.topics[]=="docker-image") | select(.name|test("\($repository_filter)")) | .name')
+          # Get the list of repositories for the user and filter them based on repository_filter and the presence of the "docker-image" topic

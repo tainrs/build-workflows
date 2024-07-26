@@ -1,0 +1,88 @@
+name: update-versions
+
+# The workflow is triggered manually, on a schedule every 15 minutes, or by a repository dispatch event with the type 'update-versions-webhook'
+on:
+  workflow_dispatch:
+  schedule:
+    - cron:  '*/15 * * * *'
+  repository_dispatch:
+    types: [update-versions-webhook]
+
+jobs:
+  do-work:
+    runs-on: ubuntu-latest
+    steps:
+      # Configure Git user details for commits
+      - name: Git Config
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # Main work step with environment variables set from GitHub context and secrets
+      - name: Do Work
+        env:
+          REPOSITORY_OWNER:  ${{ github.repository_owner }}
+          GH_ACTOR:          ${{ github.actor }}
+          GH_TOKEN:          ${{ github.token }}
+          PERSONAL_TOKEN:    ${{ secrets.GH_TOKEN }}
+          SLACK_WEBHOOK:     ${{ secrets.SLACK_WEBHOOK }}
+          REPOSITORY_FILTER: ${{ github.event.client_payload.repo }}
+          BRANCH_FILTER:     ${{ github.event.client_payload.branch }}
+        run: |
+          # Iterate over each repository owned by the REPOSITORY_OWNER user
+          while read REPOSITORY; do
+            # For each repository, iterate over branches that match the BRANCH_FILTER and are not named 'main'
+            while IFS= read -r BRANCH; do
+              # Clone the repository's branch using the personal access token for authentication
+              git clone -b "${BRANCH}" "https://${PERSONAL_TOKEN}@github.com/${REPOSITORY_OWNER}/${REPOSITORY}.git"
+              cd "${REPOSITORY}" || exit 1
+              ###########################################
+              # Capture the current version from VERSION.json
+              [[ -f update-versions.sh ]] && old_version="$(jq -r '.version' < VERSION.json)" || continue
+              # If the update-versions.sh script exists, run it with the necessary environment variables
+              [[ -f update-versions.sh ]] && GITHUB_ACTOR=${GH_ACTOR} GITHUB_TOKEN=${GH_TOKEN} bash ./update-versions.sh || continue
+              # Capture the new version from VERSION.json and determine the commit and slack messages
+              if new_version="$(jq -re '.version' < VERSION.json)"; then
+                commit_message="Version update: ${old_version} => ${new_version}"
+                slack_message="Version changes detected: \`${old_version}\` => \`${new_version}\`"
+              else
+                commit_message="Version update"
+                slack_message="Version changes detected."
+              fi
+              # Stage all changes and commit them with the determined commit message
+              git add .
+              if git commit -m "${commit_message}"; then
+                # Push the changes back to the repository using the personal access token for authentication
+                git push "https://${PERSONAL_TOKEN}@github.com/${REPOSITORY_OWNER}/${REPOSITORY}.git"
+                # Capture the commit SHA and current timestamp for the Slack message
+                GIT_SHA=$(git log -n 1 --pretty=format:"%H")
+                timestamp=$(date +%s)
+                # Construct the JSON payload for the Slack message
+                json=$(jq -nc --arg     title       "${REPOSITORY_OWNER}/${REPOSITORY}:${BRANCH}" \
+                              --arg     url         "https://github.com/${REPOSITORY_OWNER}/${REPOSITORY}/commit/${GIT_SHA}" \
+                              --arg     description "${slack_message}" \
+                              --arg     color       "#36a64f" \
+                              --arg     timestamp   "${timestamp}" \
+                              '{"attachments": [
+                                {
+                                  "title": $title,
+                                  "title_link": $url,
+                                  "text": $description,
+                                  "color": $color,
+                                  "footer": "Powered by GitHub Actions",
+                                  "ts": $timestamp
+                                }
+                              ]}')
+                # Output the JSON payload for debugging
+                jq <<< "${json}"
+                # Send the constructed JSON payload to the Slack webhook
+                curl -fsSL -X POST -H "Content-Type: application/json" -d "${json}" "${SLACK_WEBHOOK}"
+              fi
+              ###########################################
+              # Navigate back to the parent directory and remove the cloned repository
+              cd .. || exit 1
+              rm -rf "${REPOSITORY}"
+            # Fetch the branches of the repository, filter them, and iterate over each branch
+            done < <(curl -u "${GH_ACTOR}:${GH_TOKEN}" -fsSL "https://api.github.com/repos/${REPOSITORY_OWNER}/${REPOSITORY}/branches" | jq -re --arg branch_filter "${BRANCH_FILTER}" '.[] | select(.name!="main") | select(.name|test("\($branch_filter)")) | .name')
+          # Fetch the repositories of the REPOSITORY_OWNER user, filter them, and iterate over each repository
+          done < <(curl -u "${GH_ACTOR}:${GH_TOKEN}" -fsSL "https://api.github.com/users/${REPOSITORY_OWNER}/repos?per_page=1000" | jq -re --arg repository_filter "${REPOSITORY_FILTER}" '.[] | select(.topics[]=="docker-image") | select(.name|test("\($repository_filter)")) | .name')

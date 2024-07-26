@@ -1,0 +1,38 @@
+# This is a GitHub Actions workflow configuration file named keep-alive.yml
+# The purpose of this workflow is to keep the repository active by running periodically.
+# This can help prevent the repository from going inactive or being archived due to inactivity.
+
+name: keep-alive
+
+# This section defines the events that will trigger the workflow.
+# 'workflow_dispatch' allows the workflow to be triggered manually from the GitHub Actions UI.
+# 'schedule' defines a cron schedule to run the workflow automatically.
+# In this case, the workflow is scheduled to run daily at midnight UTC.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron:  '0 0 * * *'
+
+# The jobs section contains all the jobs that are part of this workflow.
+# Each job is a sequence of steps that are executed in the specified order.
+jobs:
+  heartbeat:
+    # The job will run on the latest version of Ubuntu available in GitHub's hosted runners.
+    runs-on: ubuntu-latest
+
+    # Permissions required by this job.
+    # 'actions: write' permission is needed to perform operations with GitHub Actions.
+    permissions:
+      actions: write
+
+    # The steps section defines the sequence of actions that will be executed as part of this job.
+    steps:
+      # The first step checks out the repository so that subsequent steps can access the code.
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # This step uses the 'keepalive-workflow' action created by gautamkrishnar.
+      # The purpose of this action is to keep the workflow running and the repository active.
+      # It helps in preventing the repository from being marked as inactive or being archived.
+      - name: Keep workflow alive
+        uses: gautamkrishnar/keepalive-workflow@v2
