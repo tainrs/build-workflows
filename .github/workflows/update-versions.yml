@@ -1,6 +1,6 @@
 name: update-versions
 
-# Triggers for the workflow: manually (workflow_dispatch) or every 15 minutes (schedule).
+# Triggers for the workflow: manually (workflow_dispatch) or every 6 hours (schedule).
 on:
   workflow_dispatch:
   schedule:
@@ -88,21 +88,21 @@ jobs:
                 git checkout --theirs VERSION.json  # Use the stash version
                 git add VERSION.json
 
-                # Optionally, commit the changes
-                git commit -m "Resolved merge conflict in VERSION.json by favoring stash changes."
+                # Commit the resolved changes with the correct version update message
+                git commit -m "${commit_message}"
+
+                # Push the changes after resolving the conflict
+                git push --set-upstream origin "${pr_branch}"
+                continue  # Continue to next repository/branch after push
               }
 
               echo "Debug message: Adding the changes to the repository..."
 
-
-              git status
-
-              # Add the changes to the repository.
+              # Always add any unstaged changes
               git add .
 
-              # Commit the changes if there are any.
+              # If no conflict occurred, continue as usual
               if git commit -m "${commit_message}"; then
-
                 git push --set-upstream origin "${pr_branch}"
 
                 if ! gh auth status; then
@@ -115,12 +115,19 @@ jobs:
                 pr_exists=$(gh pr list --base "${BRANCH}" --head "${pr_branch}" --repo "${REPOSITORY_OWNER}/${REPOSITORY}" --json number --jq '. | length')
 
                 pr_body_text="Version changes detected: \`${old_version}\` => \`${new_version}\`<br/>This PR was automatically created by the \`update-versions.sh\` script."
+                pr_title="Version update: ${old_version} => ${new_version} by 'update-versions.sh' on branch ${BRANCH}"
 
                 if [ "$pr_exists" -gt 0 ]; then
                   pr_number=$(gh pr list --base "${BRANCH}" --head "${pr_branch}" --repo "${REPOSITORY_OWNER}/${REPOSITORY}" --json number --jq '.[0].number')
+
+                  # Update the PR title and body
+                  gh pr edit "${pr_number}" --title "${pr_title}" --body "${pr_body_text}"
+
+                  # Optionally, add a comment if there are additional updates
                   gh pr comment "${pr_number}" --body "Additional updates have been made by the \`update-versions.sh\` script.<br/><br/>${pr_body_text}"
                 else
-                  gh pr create --title "Version update: ${old_version} => ${new_version} by 'update-versions.sh' on branch ${BRANCH}" --body "${pr_body_text}" --base "${BRANCH}" --head "${pr_branch}" --repo "${REPOSITORY_OWNER}/${REPOSITORY}"
+                  # Create a new PR if one does not exist
+                  gh pr create --title "${pr_title}" --body "${pr_body_text}" --base "${BRANCH}" --head "${pr_branch}" --repo "${REPOSITORY_OWNER}/${REPOSITORY}"
                   GIT_SHA=$(git log -n 1 --pretty=format:"%H")
                   timestamp=$(date +%s)
                   json=$(jq -nc --arg title "${REPOSITORY_OWNER}/${REPOSITORY}:${BRANCH}" \
@@ -149,4 +156,3 @@ jobs:
               rm -rf "${REPOSITORY}"
             done < <(curl -u "${GH_ACTOR}:${GH_TOKEN}" -fsSL "https://api.github.com/repos/${REPOSITORY_OWNER}/${REPOSITORY}/branches" | jq -re --arg branch_filter "${BRANCH_FILTER}" '.[] | select(.name!="main") | select(.name|test("\($branch_filter)")) | select(.name | test("^update-") | not) | .name')
           done < <(curl -u "${GH_ACTOR}:${GH_TOKEN}" -fsSL "https://api.github.com/users/${REPOSITORY_OWNER}/repos?per_page=1000" | jq -re --arg repository_filter "${REPOSITORY_FILTER}" '.[] | select(.topics[]=="docker-image") | select(.name|test("\($repository_filter)")) | .name')
-
