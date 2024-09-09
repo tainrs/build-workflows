@@ -81,7 +81,12 @@ jobs:
               echo "Debug message: Pop the stash..."
 
               # And pop the stash.
-              git stash pop
+              # git stash pop
+              git stash pop || git merge --abort
+
+              # Resolve conflicts automatically by favoring the stash version
+              git checkout --theirs VERSION.json  # Use the stash version
+              git add VERSION.json
 
               echo "Debug message: Adding the changes to the repository..."
 
