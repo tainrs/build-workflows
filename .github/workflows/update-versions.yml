@@ -80,15 +80,20 @@ jobs:
 
               echo "Debug message: Pop the stash..."
 
-              # And pop the stash.
-              # git stash pop
-              git stash pop || git merge --abort
+              # Pop the stash and check for conflicts
+              git stash pop || {
+                echo "Merge conflict detected. Resolving by favoring the stash version..."
 
-              # Resolve conflicts automatically by favoring the stash version
-              git checkout --theirs VERSION.json  # Use the stash version
-              git add VERSION.json
+                # Resolve conflicts automatically by favoring the stash version
+                git checkout --theirs VERSION.json  # Use the stash version
+                git add VERSION.json
+
+                # Optionally, commit the changes
+                git commit -m "Resolved merge conflict in VERSION.json by favoring stash changes."
+              }
 
               echo "Debug message: Adding the changes to the repository..."
+
 
               git status
 
